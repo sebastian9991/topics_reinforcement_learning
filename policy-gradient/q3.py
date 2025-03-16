@@ -1,6 +1,9 @@
+import json
+import multiprocessing
 import os
 import random
 from collections import deque
+from datetime import datetime
 from re import template
 
 import ale_py
@@ -14,8 +17,9 @@ from tqdm import tqdm
 
 gym.register_envs(ale_py)
 
-device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
-print(f"MPS not available, using device: {device}")
+# device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
+device = torch.device("cpu")
+print(f"Using device: {device}")
 
 
 # Neural Network for function approximation
@@ -170,7 +174,7 @@ def run_trial(
     initial_temperature,
     temperature_decay,
     num_episodes=1000,
-    hidden_dim=256,
+    max_iterations=100,
     seed=None,
 ):
     # Set random seeds for reproducibility
@@ -196,24 +200,24 @@ def run_trial(
         agent = algorithm_class(
             state_dim,
             action_dim,
-            alpha_theta=alpha_theta,
-            alpha_w=alpha_w,
             initial_temperature=initial_temperature,
             temperature_decay=temperature_decay,
-            hidden_dim=hidden_dim,
+            alpha_theta=alpha_theta,
         )
     else:
         agent = algorithm_class(
             state_dim,
             action_dim,
+            initial_temperature=initial_temperature,
+            temperature_decay=temperature_decay,
             alpha_theta=alpha_theta,
-            hidden_dim=hidden_dim,
+            alpha_w=alpha_w,
         )
 
     # Run episodes
     episode_rewards = []
 
-    for episode in range(num_episodes):
+    for episode in tqdm(range(num_episodes), desc="Running Episodes..."):
         # In newer gymnasium versions, reset returns (state, info)
         reset_result = env.reset()
         if isinstance(reset_result, tuple):
@@ -226,12 +230,13 @@ def run_trial(
         truncated = False
         trajectory = []
 
-        while not (done or truncated):
+        itr = 0
+        while not (done or truncated) and itr < max_iterations:
             # Choose action based on current state
-            action = agent.actor.select_action(state)
+            action_pair = agent.actor.select_action(state)
 
             # Take action in environment - newer versions return (next_state, reward, done, truncated, info)
-            step_result = env.step(action)
+            step_result = env.step(action_pair[0])
             if len(step_result) == 5:  # New gym API
                 next_state, reward, done, truncated, _ = step_result
             else:  # Old gym API
@@ -240,13 +245,16 @@ def run_trial(
 
             # Update agent's knowledge
             if use_reinforce:
-                trajectory.append((state, action, reward))
+                trajectory.append((state, action_pair[0], reward))
             else:
-                agent.update(state, action, reward, next_state, done or truncated)
+                agent.update(
+                    state, action_pair[0], reward, next_state, done or truncated
+                )
 
             # Update state and accumulate reward
             state = next_state
             total_reward += reward
+            itr += 1
 
         if use_reinforce:
             agent.update(trajectory)
@@ -266,9 +274,8 @@ def run_experiments(
     alpha_w,
     initial_temperature,
     temperature_decay,
-    num_trials=50,
-    num_episodes=1000,
-    hidden_dim=256,
+    num_trials=1,
+    num_episodes=10,
 ):
     results = {}
 
@@ -277,7 +284,7 @@ def run_experiments(
 
     for trial in tqdm(
         range(num_trials),
-        desc=f"env:{env_name}_class:{use_reinforce}_temperature:{initial_temperature}_w_decay:{temperature_decay}",
+        desc=f"env:{env_name}_REINFORCE: {use_reinforce}_Temperature: {initial_temperature}_w_decay: {temperature_decay}",
     ):
         rewards = run_trial(
             env_name,
@@ -288,7 +295,6 @@ def run_experiments(
             initial_temperature,
             temperature_decay,
             num_episodes,
-            hidden_dim,
             seed=trial,
         )
         results[key].append(rewards)
@@ -296,9 +302,50 @@ def run_experiments(
     return results
 
 
+def save_results(results, experiment_name):
+    """Save experiment results to a local ./results folder as a JSON file."""
+    results_dir = "./results"
+    os.makedirs(results_dir, exist_ok=True)
+
+    timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
+    filename = f"{experiment_name}_{timestamp}.json"
+    filepath = os.path.join(results_dir, filename)
+
+    with open(filepath, "w") as f:
+        json.dump(results, f, indent=4)
+
+    print(f"Results saved to {filepath}")
+
+
+def run_and_save_experiment(
+    env_name,
+    use_reinforce,
+    algorithm_class,
+    alpha_theta,
+    alpha_w,
+    initial_temperature,
+    temperature_decay,
+    filename,
+):
+    """Runs an experiment and saves the results."""
+    print(
+        f"Running {env_name} on {'REINFORCE' if use_reinforce else 'Actor-Critic'}, {'Decay' if temperature_decay else 'Fixed'} Temp."
+    )
+    results = run_experiments(
+        env_name,
+        use_reinforce=use_reinforce,
+        algorithm_class=algorithm_class,
+        alpha_theta=alpha_theta,
+        alpha_w=alpha_w,
+        initial_temperature=initial_temperature,
+        temperature_decay=temperature_decay,
+    )
+    save_results(results, filename)
+
+
 def main():
-    alpha_theta = 0.01
-    alpha_w = 0.01
+    alpha_theta = 0.5
+    alpha_w = 0.5
     initial_temperature = 2.0
 
     print("Running Acrobat-v1 experiement")
@@ -312,6 +359,7 @@ def main():
         initial_temperature=initial_temperature,
         temperature_decay=False,
     )
+    save_results(acrobat_actor_fixed_results, "acrobat_actor_fixed")
 
     print("Running Acrobot-v1 on Actor-Critic, Decay Temp.")
     acrobat_actor_decay_results = run_experiments(
@@ -323,28 +371,31 @@ def main():
         initial_temperature=initial_temperature,
         temperature_decay=True,
     )
+    save_results(acrobat_actor_decay_results, "acrobat_actor_decay")
 
     print("Running Acrobot-v1 on REINFORCE, Fixed Temp.")
     acrobat_reinforce_fixed_results = run_experiments(
         "Acrobot-v1",
         use_reinforce=True,
-        algorithm_class=ActorCritic,
+        algorithm_class=Reinforce,
         alpha_theta=alpha_theta,
         alpha_w=alpha_w,
         initial_temperature=initial_temperature,
         temperature_decay=False,
     )
+    save_results(acrobat_reinforce_fixed_results, "acrobat_reinforce_fixed")
 
     print("Running Acrobot-v1 on REINFORCE, Decay Temp.")
     acrobat_reinforce_decay_results = run_experiments(
         "Acrobot-v1",
         use_reinforce=True,
-        algorithm_class=ActorCritic,
+        algorithm_class=Reinforce,
         alpha_theta=alpha_theta,
         alpha_w=alpha_w,
         initial_temperature=initial_temperature,
         temperature_decay=True,
     )
+    save_results(acrobat_reinforce_decay_results, "acrobat_reinforce_decay")
 
     print("Running ALE/Assault-ram-v5 experiement.")
     print("Running ALE/Assault-ram-v5 on Actor-Critic, Fixed Temp.")
@@ -357,6 +408,7 @@ def main():
         initial_temperature=initial_temperature,
         temperature_decay=False,
     )
+    save_results(assault_actor_fixed_results, "assault_actor_fixed")
     print("Running ALE/Assault-ram-v5 on Actor-Critic, Decay Temp.")
     assault_actor_decay_results = run_experiments(
         "ALE/Assault-ram-v5",
@@ -368,27 +420,30 @@ def main():
         temperature_decay=True,
     )
 
+    save_results(assault_actor_decay_results, "assault_actor_decay")
     print("Running ALE/Assault-ram-v5 on REINFORCE, Fixed Temp.")
     assault_reinforce_fixed_results = run_experiments(
         "ALE/Assault-ram-v5",
         use_reinforce=True,
-        algorithm_class=ActorCritic,
+        algorithm_class=Reinforce,
         alpha_theta=alpha_theta,
         alpha_w=alpha_w,
         initial_temperature=initial_temperature,
         temperature_decay=False,
     )
 
+    save_results(assault_reinforce_fixed_results, "assault_reinforce_fixed")
     print("Running ALE/Assault-ram-v5 on REINFORCE, Decay Temp.")
-    assault_reinforce_decay_reults = run_experiments(
+    assault_reinforce_decay_results = run_experiments(
         "ALE/Assault-ram-v5",
         use_reinforce=True,
-        algorithm_class=ActorCritic,
+        algorithm_class=Reinforce,
         alpha_theta=alpha_theta,
         alpha_w=alpha_w,
         initial_temperature=initial_temperature,
         temperature_decay=True,
     )
+    save_results(assault_reinforce_decay_results, "assault_reinforce_decay")
 
 
 if __name__ == "__main__":
