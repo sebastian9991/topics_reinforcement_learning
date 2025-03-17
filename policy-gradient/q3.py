@@ -26,8 +26,10 @@ print(f"Using device: {device}")
 class MLP(nn.Module):
     def __init__(self, input_dim, output_dim, hidden_dim=256):
         super(MLP, self).__init__()
+        # TODO: 
+        #TEST a two-layer network with a higher max_iter paramater
         self.fc1 = nn.Linear(input_dim, hidden_dim)
-        self.fc2 = nn.Linear(hidden_dim, hidden_dim)
+        self.fc2 = nn.Linear(hidden_dim, hidden_dim) 
         self.fc3 = nn.Linear(hidden_dim, output_dim)
 
         # Initialize weights uniformly between -0.001 and 0.001 as specified
@@ -96,6 +98,7 @@ class ActorCritic:
             self.actor.policy_net.parameters(), lr=alpha_theta
         )
         self.critic_optimizer = optim.Adam(self.critic.parameters(), lr=alpha_w)
+        self.I = 1.0
 
     def update(self, state, action, reward, next_state, done):
         state_tensor = torch.tensor(state, dtype=torch.float32)
@@ -120,10 +123,13 @@ class ActorCritic:
 
         # Policy Gradient Update
         _, prob = self.actor.select_action(state)
-        policy_loss = -torch.log(prob) * delta.detach()
+        policy_loss = -torch.log(prob) * self.I * delta.detach()
         self.actor_optimizer.zero_grad()
         policy_loss.backward()
         self.actor_optimizer.step()
+
+        #Decay i
+        self.I *= self.gamma
 
         # Decay temp
 
@@ -274,8 +280,8 @@ def run_experiments(
     alpha_w,
     initial_temperature,
     temperature_decay,
-    num_trials=1,
-    num_episodes=10,
+    num_trials=10,
+    num_episodes=1000,
 ):
     results = {}
 
@@ -344,9 +350,9 @@ def run_and_save_experiment(
 
 
 def main():
-    alpha_theta = 0.5
-    alpha_w = 0.5
-    initial_temperature = 2.0
+    alpha_theta = 0.001
+    alpha_w = 0.001
+    initial_temperature = 1.0
 
     print("Running Acrobat-v1 experiement")
     print("Running Acrobot-v1 on Actor-Critic, Fixed Temp.")
