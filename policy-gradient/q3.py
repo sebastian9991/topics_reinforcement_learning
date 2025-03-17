@@ -23,16 +23,31 @@ print(f"Using device: {device}")
 
 
 # Neural Network for function approximation
+class MLP_Xavier(nn.Module):
+    def __init__(self, input_dim, output_dim, hidden_dim=256):
+        super(MLP_Xavier, self).__init__()
+        self.fc1 = nn.Linear(input_dim, hidden_dim)
+        self.fc2 = nn.Linear(hidden_dim, output_dim)
+
+        # Initialize weights uniformly between -0.001 and 0.001
+        for m in self.modules():
+            if isinstance(m, nn.Linear):
+                nn.init.xavier_uniform_(m.weight, gain=1.0)
+                nn.init.zeros_(m.bias)
+
+    def forward(self, x):
+        x = torch.relu(self.fc1(x))
+        return self.fc2(x)
+
+
+# Neural Network for function approximation
 class MLP(nn.Module):
     def __init__(self, input_dim, output_dim, hidden_dim=256):
         super(MLP, self).__init__()
-        # TODO: 
-        #TEST a two-layer network with a higher max_iter paramater
         self.fc1 = nn.Linear(input_dim, hidden_dim)
-        self.fc2 = nn.Linear(hidden_dim, hidden_dim) 
-        self.fc3 = nn.Linear(hidden_dim, output_dim)
+        self.fc2 = nn.Linear(hidden_dim, output_dim)
 
-        # Initialize weights uniformly between -0.001 and 0.001 as specified
+        # Initialize weights uniformly between -0.001 and 0.001
         for m in self.modules():
             if isinstance(m, nn.Linear):
                 nn.init.uniform_(m.weight, -0.001, 0.001)
@@ -40,8 +55,7 @@ class MLP(nn.Module):
 
     def forward(self, x):
         x = torch.relu(self.fc1(x))
-        x = torch.relu(self.fc2(x))
-        return self.fc3(x)
+        return self.fc2(x)
 
 
 class BoltzmannPolicy:
@@ -50,11 +64,14 @@ class BoltzmannPolicy:
         state_dim,
         action_dim,
         initial_temperature,
+        env,
         min_temperature=0.1,
         decay_steps=500,
-        hidden_dim=256,
     ):
-        self.policy_net = MLP(state_dim, action_dim, hidden_dim)
+        if env == "ALE/Assault-ram-v5":
+            self.policy_net = MLP(state_dim, action_dim)
+        elif env == "Acrobot-v1":
+            self.policy_net = MLP_Xavier(state_dim, action_dim)
         self.temperature = initial_temperature
         self.min_temperature = min_temperature
         self.scheduler = torch.optim.lr_scheduler.LinearLR(
@@ -84,14 +101,15 @@ class ActorCritic:
         action_dim,
         initial_temperature,
         temperature_decay,
-        alpha_theta=0.01,
-        alpha_w=0.01,
+        env,
+        alpha_theta=0.001,
+        alpha_w=0.001,
         gamma=0.99,
     ):
         self.gamma = gamma
         self.temperature_decay = temperature_decay
         self.actor = BoltzmannPolicy(
-            state_dim, action_dim, initial_temperature=initial_temperature
+            state_dim, action_dim, initial_temperature=initial_temperature, env=env
         )
         self.critic = MLP(state_dim, 1)  # Our state-value function
         self.actor_optimizer = optim.Adam(
@@ -128,11 +146,13 @@ class ActorCritic:
         policy_loss.backward()
         self.actor_optimizer.step()
 
-        #Decay i
+        # Decay i
         self.I *= self.gamma
 
-        # Decay temp
+        # print(f"Gradient norm for actor: {check_norm(self.actor.policy_net)}")
+        # print(f"Gradient norm for critic: {check_norm(self.critic)}")
 
+        # Decay temp
         if self.temperature_decay:
             self.actor.decay_temperature()
 
@@ -144,18 +164,20 @@ class Reinforce:
         action_dim,
         initial_temperature,
         temperature_decay,
-        alpha_theta=0.01,
+        env,
+        alpha_theta=0.001,
         gamma=0.99,
     ):
         self.gamma = gamma
         self.temperature_decay = temperature_decay
-        self.actor = BoltzmannPolicy(state_dim, action_dim, initial_temperature)
+        self.actor = BoltzmannPolicy(
+            state_dim, action_dim, initial_temperature=initial_temperature, env=env
+        )
         self.theta_optimizer = optim.Adam(
             self.actor.policy_net.parameters(), lr=alpha_theta
         )
 
     def update(self, trajectory):
-
         G = 0
         for t in reversed(range(len(trajectory))):
             state, _, reward = trajectory[t]
@@ -166,8 +188,8 @@ class Reinforce:
             loss.backward()
             self.theta_optimizer.step()
 
-        if self.temperature_decay:
-            self.actor.decay_temperature()
+            if self.temperature_decay:
+                self.actor.decay_temperature()
 
 
 # Function to run a single trial with a specific algorithm and parameters
@@ -180,7 +202,7 @@ def run_trial(
     initial_temperature,
     temperature_decay,
     num_episodes=1000,
-    max_iterations=100,
+    max_iterations=1000,
     seed=None,
 ):
     # Set random seeds for reproducibility
@@ -208,6 +230,7 @@ def run_trial(
             action_dim,
             initial_temperature=initial_temperature,
             temperature_decay=temperature_decay,
+            env = env_name, 
             alpha_theta=alpha_theta,
         )
     else:
@@ -216,6 +239,7 @@ def run_trial(
             action_dim,
             initial_temperature=initial_temperature,
             temperature_decay=temperature_decay,
+            env = env_name, 
             alpha_theta=alpha_theta,
             alpha_w=alpha_w,
         )
@@ -280,8 +304,8 @@ def run_experiments(
     alpha_w,
     initial_temperature,
     temperature_decay,
-    num_trials=10,
-    num_episodes=1000,
+    num_trials=1,
+    num_episodes=20,
 ):
     results = {}
 
@@ -306,6 +330,15 @@ def run_experiments(
         results[key].append(rewards)
 
     return results
+
+
+def check_norm(model):
+    grads = [
+        param.grad.detach().flatten()
+        for param in model.parameters()
+        if param.grad is not None
+    ]
+    return torch.cat(grads).norm()
 
 
 def save_results(results, experiment_name):

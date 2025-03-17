@@ -1,0 +1,7 @@
+ale-py
+matplotlib
+numpy
+gymnasium
+torch
+tqdm
+
