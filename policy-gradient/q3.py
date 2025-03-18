@@ -304,8 +304,8 @@ def run_experiments(
     alpha_w,
     initial_temperature,
     temperature_decay,
-    num_trials=1,
-    num_episodes=20,
+    num_trials=10,
+    num_episodes=1000,
 ):
     results = {}
 
