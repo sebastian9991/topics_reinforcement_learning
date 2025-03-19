@@ -81,11 +81,27 @@ class BoltzmannPolicy:
             total_iters=decay_steps,
         )
 
-    def select_action(self, state, temperature=1.0):
+    def select_action(self, state):
         logits = self.policy_net(torch.tensor(state, dtype=torch.float32))
-        prob = torch.softmax(logits / temperature, dim=-1)
+        prob = torch.softmax(logits / self.temperature, dim=-1)
         action = torch.multinomial(prob, num_samples=1).item()
         return action, prob[action]
+
+    def get_policy(self, state):
+        logits = self.policy_net(torch.tensor(state, dtype=torch.float32))
+        return torch.softmax(logits / self.temperature, dim=-1)
+
+    def get_policies(self, states):
+        return torch.stack(
+            [
+                torch.softmax(
+                    self.policy_net(torch.tensor(state, dtype=torch.float32))
+                    / self.temperature,
+                    dim=-1,
+                )
+                for state in states
+            ]
+        )
 
     def decay_temperature(self):
         self.scheduler.step()
@@ -111,7 +127,10 @@ class ActorCritic:
         self.actor = BoltzmannPolicy(
             state_dim, action_dim, initial_temperature=initial_temperature, env=env
         )
-        self.critic = MLP(state_dim, 1)  # Our state-value function
+        if env == "ALE/Assault-ram-v5":
+            self.critic = MLP(state_dim, 1)
+        elif env == "Acrobot-v1":
+            self.critic = MLP_Xavier(state_dim, 1)
         self.actor_optimizer = optim.Adam(
             self.actor.policy_net.parameters(), lr=alpha_theta
         )
@@ -121,7 +140,6 @@ class ActorCritic:
     def update(self, state, action, reward, next_state, done):
         state_tensor = torch.tensor(state, dtype=torch.float32)
         next_state_tensor = torch.tensor(next_state, dtype=torch.float32)
-        action_tensor = torch.tensor(action, dtype=torch.float32)
         reward_tensor = torch.tensor(reward, dtype=torch.float32)
 
         # Compute the value estimates from the value-estimate critic network
@@ -140,7 +158,8 @@ class ActorCritic:
         self.critic_optimizer.step()
 
         # Policy Gradient Update
-        _, prob = self.actor.select_action(state)
+        probs = self.actor.get_policy(state)
+        prob = probs[action]
         policy_loss = -torch.log(prob) * self.I * delta.detach()
         self.actor_optimizer.zero_grad()
         policy_loss.backward()
@@ -149,12 +168,6 @@ class ActorCritic:
         # Decay i
         self.I *= self.gamma
 
-        # print(f"Gradient norm for actor: {check_norm(self.actor.policy_net)}")
-        # print(f"Gradient norm for critic: {check_norm(self.critic)}")
-
-        # Decay temp
-        if self.temperature_decay:
-            self.actor.decay_temperature()
 
 
 class Reinforce:
@@ -178,18 +191,28 @@ class Reinforce:
         )
 
     def update(self, trajectory):
+        self.theta_optimizer.zero_grad()
         G = 0
+        G_returns = []
         for t in reversed(range(len(trajectory))):
-            state, _, reward = trajectory[t]
+            _, _, reward = trajectory[t]
             G = reward + self.gamma * G
-            _, prob = self.actor.select_action(state)
-            loss = -torch.log(prob) * (self.gamma**t) * G
-            self.theta_optimizer.zero_grad()
-            loss.backward()
-            self.theta_optimizer.step()
+            G_returns.insert(0, G)
 
-            if self.temperature_decay:
-                self.actor.decay_temperature()
+        states = torch.tensor([x[0] for x in trajectory])
+        actions = torch.tensor([x[1] for x in trajectory])
+        returns = torch.tensor(np.array(G_returns))
+
+        probs = self.actor.get_policies(states)
+        log_probs = torch.log(probs + 1e-8)
+        indexed_log_probs = log_probs.gather(1, actions.unsqueeze(1)).squeeze()
+
+        gammas = torch.tensor(
+            [self.gamma**t for t in range(len(trajectory))], dtype=torch.float32
+        )
+        loss = -torch.sum(indexed_log_probs * returns * gammas)
+        loss.backward()
+        self.theta_optimizer.step()
 
 
 # Function to run a single trial with a specific algorithm and parameters
@@ -230,7 +253,7 @@ def run_trial(
             action_dim,
             initial_temperature=initial_temperature,
             temperature_decay=temperature_decay,
-            env = env_name, 
+            env=env_name,
             alpha_theta=alpha_theta,
         )
     else:
@@ -239,7 +262,7 @@ def run_trial(
             action_dim,
             initial_temperature=initial_temperature,
             temperature_decay=temperature_decay,
-            env = env_name, 
+            env=env_name,
             alpha_theta=alpha_theta,
             alpha_w=alpha_w,
         )
@@ -286,9 +309,12 @@ def run_trial(
             total_reward += reward
             itr += 1
 
+            if temperature_decay:
+                agent.actor.decay_temperature()
+
         if use_reinforce:
             agent.update(trajectory)
-        # Store episode reward
+
         episode_rewards.append(total_reward)
 
     env.close()
@@ -356,6 +382,58 @@ def save_results(results, experiment_name):
     print(f"Results saved to {filepath}")
 
 
+def plot_training_curves(results, title):
+    plt.figure(figsize=(10, 6))
+
+    colors = {"reinforce": "green", "actor_critic": "red"}
+    line_styles = {"fixed": "-", "decay": "--"}
+
+    for result_dicts in results:
+        for key, results in result_dicts.items():
+            parts = key.split("_")  # Extract algorithm and decay setting
+            env_name = parts[0].split(":")[1]
+            use_reinforce = parts[1].split(":")[1] == "True"
+            temperature_decay = parts[4].split(":")[1] == "True"
+            algorithm = "reinforce" if use_reinforce else "actor_critic"
+            color = colors[algorithm]
+            linestyle = (
+                line_styles["decay"] if temperature_decay else line_styles["fixed"]
+            )
+
+            # Convert results to numpy array (shape: num_seeds x num_episodes)
+            results_array = np.array(results)
+            mean_performance = np.mean(results_array, axis=0)
+            std_performance = np.std(results_array, axis=0)
+            episodes = np.arange(len(mean_performance))
+
+            # Plot mean with shaded standard deviation
+            plt.plot(
+                episodes,
+                mean_performance,
+                label=f"{algorithm.capitalize()} ({'Decay' if temperature_decay else 'Fixed'})",
+                color=color,
+                linestyle=linestyle,
+            )
+            plt.fill_between(
+                episodes,
+                mean_performance - std_performance,
+                mean_performance + std_performance,
+                color=color,
+                alpha=0.2,
+            )
+    plt.xlabel("Episode")
+    plt.ylabel("Performance")
+    plt.title(title)
+    plt.legend()
+    plt.grid(True)
+
+    # Save the figure
+    os.makedirs("figures", exist_ok=True)
+    filename = f"{title}.png"
+    plt.savefig(os.path.join("figures", filename))
+    plt.close()
+
+
 def run_and_save_experiment(
     env_name,
     use_reinforce,
@@ -387,9 +465,9 @@ def main():
     alpha_w = 0.001
     initial_temperature = 1.0
 
-    print("Running Acrobat-v1 experiement")
     print("Running Acrobot-v1 on Actor-Critic, Fixed Temp.")
-    acrobat_actor_fixed_results = run_experiments(
+    print("Running Acrobat-v1 experiement")
+    acrobot_actor_fixed_results = run_experiments(
         "Acrobot-v1",
         use_reinforce=False,
         algorithm_class=ActorCritic,
@@ -398,10 +476,9 @@ def main():
         initial_temperature=initial_temperature,
         temperature_decay=False,
     )
-    save_results(acrobat_actor_fixed_results, "acrobat_actor_fixed")
-
+    save_results(acrobot_actor_fixed_results, "acrobot_actor_fixed")
     print("Running Acrobot-v1 on Actor-Critic, Decay Temp.")
-    acrobat_actor_decay_results = run_experiments(
+    acrobot_actor_decay_results = run_experiments(
         "Acrobot-v1",
         use_reinforce=False,
         algorithm_class=ActorCritic,
@@ -410,10 +487,9 @@ def main():
         initial_temperature=initial_temperature,
         temperature_decay=True,
     )
-    save_results(acrobat_actor_decay_results, "acrobat_actor_decay")
-
+    save_results(acrobot_actor_decay_results, "acrobot_actor_decay")
     print("Running Acrobot-v1 on REINFORCE, Fixed Temp.")
-    acrobat_reinforce_fixed_results = run_experiments(
+    acrobot_reinforce_fixed_results = run_experiments(
         "Acrobot-v1",
         use_reinforce=True,
         algorithm_class=Reinforce,
@@ -422,10 +498,10 @@ def main():
         initial_temperature=initial_temperature,
         temperature_decay=False,
     )
-    save_results(acrobat_reinforce_fixed_results, "acrobat_reinforce_fixed")
+    save_results(acrobot_reinforce_fixed_results, "acrobot_reinforce_fixed")
 
     print("Running Acrobot-v1 on REINFORCE, Decay Temp.")
-    acrobat_reinforce_decay_results = run_experiments(
+    acrobot_reinforce_decay_results = run_experiments(
         "Acrobot-v1",
         use_reinforce=True,
         algorithm_class=Reinforce,
@@ -434,8 +510,17 @@ def main():
         initial_temperature=initial_temperature,
         temperature_decay=True,
     )
-    save_results(acrobat_reinforce_decay_results, "acrobat_reinforce_decay")
-
+    save_results(acrobot_reinforce_decay_results, "acrobot_reinforce_decay")
+    plot_training_curves(
+        [
+            acrobot_actor_fixed_results,
+            acrobot_actor_decay_results,
+            acrobot_reinforce_fixed_results,
+            acrobot_reinforce_decay_results,
+        ],
+        "Actor-Critic & Reinforce on Acrobot-v1",
+    )
+    ### ASSAULT EXPERIMENT ####
     print("Running ALE/Assault-ram-v5 experiement.")
     print("Running ALE/Assault-ram-v5 on Actor-Critic, Fixed Temp.")
     assault_actor_fixed_results = run_experiments(
@@ -483,6 +568,16 @@ def main():
         temperature_decay=True,
     )
     save_results(assault_reinforce_decay_results, "assault_reinforce_decay")
+
+    plot_training_curves(
+        [
+            assault_actor_fixed_results,
+            assault_actor_decay_results,
+            assault_reinforce_fixed_results,
+            assault_reinforce_decay_results,
+        ],
+        "Actor-Critic & Reinforce on Assault-ram-v5",
+    )
 
 
 if __name__ == "__main__":
