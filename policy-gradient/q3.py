@@ -51,7 +51,7 @@ class MLP(nn.Module):
         for m in self.modules():
             if isinstance(m, nn.Linear):
                 nn.init.uniform_(m.weight, -0.001, 0.001)
-                nn.init.uniform_(m.bias, -0.001, 0.001)
+                nn.init.zeros_(m.bias)
 
     def forward(self, x):
         x = torch.relu(self.fc1(x))
@@ -66,7 +66,7 @@ class BoltzmannPolicy:
         initial_temperature,
         env,
         min_temperature=0.1,
-        decay_steps=500,
+        decay_steps=1000,
     ):
         if env == "ALE/Assault-ram-v5":
             self.policy_net = MLP(state_dim, action_dim)
@@ -89,7 +89,9 @@ class BoltzmannPolicy:
 
     def get_policy(self, state):
         logits = self.policy_net(torch.tensor(state, dtype=torch.float32))
-        return torch.softmax(logits / self.temperature, dim=-1)
+        return torch.softmax(
+            logits - logits.max() / self.temperature, dim=-1
+        )  # Numerically stable softmax
 
     def get_policies(self, states):
         return torch.stack(
@@ -152,7 +154,7 @@ class ActorCritic:
         delta = reward_tensor + self.gamma * next_value - value
 
         # Update the critic (State-Value function)
-        critic_loss = delta.pow(2).mean()
+        critic_loss = delta.pow(2)
         self.critic_optimizer.zero_grad()
         critic_loss.backward()
         self.critic_optimizer.step()
@@ -160,14 +162,13 @@ class ActorCritic:
         # Policy Gradient Update
         probs = self.actor.get_policy(state)
         prob = probs[action]
-        policy_loss = -torch.log(prob) * self.I * delta.detach()
+        policy_loss = -torch.log(prob + 1e-8) * self.I * delta.detach()
         self.actor_optimizer.zero_grad()
         policy_loss.backward()
         self.actor_optimizer.step()
 
         # Decay i
         self.I *= self.gamma
-
 
 
 class Reinforce:
@@ -271,6 +272,10 @@ def run_trial(
     episode_rewards = []
 
     for episode in tqdm(range(num_episodes), desc="Running Episodes..."):
+        # Reset I term
+        if not use_reinforce:
+            agent.I = 1
+
         # In newer gymnasium versions, reset returns (state, info)
         reset_result = env.reset()
         if isinstance(reset_result, tuple):
@@ -309,8 +314,8 @@ def run_trial(
             total_reward += reward
             itr += 1
 
-            if temperature_decay:
-                agent.actor.decay_temperature()
+        if temperature_decay:
+            agent.actor.decay_temperature()
 
         if use_reinforce:
             agent.update(trajectory)
@@ -330,8 +335,8 @@ def run_experiments(
     alpha_w,
     initial_temperature,
     temperature_decay,
-    num_trials=10,
-    num_episodes=1000,
+    num_trials=1,
+    num_episodes=50,
 ):
     results = {}
 
@@ -465,61 +470,61 @@ def main():
     alpha_w = 0.001
     initial_temperature = 1.0
 
-    print("Running Acrobot-v1 on Actor-Critic, Fixed Temp.")
-    print("Running Acrobat-v1 experiement")
-    acrobot_actor_fixed_results = run_experiments(
-        "Acrobot-v1",
-        use_reinforce=False,
-        algorithm_class=ActorCritic,
-        alpha_theta=alpha_theta,
-        alpha_w=alpha_w,
-        initial_temperature=initial_temperature,
-        temperature_decay=False,
-    )
-    save_results(acrobot_actor_fixed_results, "acrobot_actor_fixed")
-    print("Running Acrobot-v1 on Actor-Critic, Decay Temp.")
-    acrobot_actor_decay_results = run_experiments(
-        "Acrobot-v1",
-        use_reinforce=False,
-        algorithm_class=ActorCritic,
-        alpha_theta=alpha_theta,
-        alpha_w=alpha_w,
-        initial_temperature=initial_temperature,
-        temperature_decay=True,
-    )
-    save_results(acrobot_actor_decay_results, "acrobot_actor_decay")
-    print("Running Acrobot-v1 on REINFORCE, Fixed Temp.")
-    acrobot_reinforce_fixed_results = run_experiments(
-        "Acrobot-v1",
-        use_reinforce=True,
-        algorithm_class=Reinforce,
-        alpha_theta=alpha_theta,
-        alpha_w=alpha_w,
-        initial_temperature=initial_temperature,
-        temperature_decay=False,
-    )
-    save_results(acrobot_reinforce_fixed_results, "acrobot_reinforce_fixed")
-
-    print("Running Acrobot-v1 on REINFORCE, Decay Temp.")
-    acrobot_reinforce_decay_results = run_experiments(
-        "Acrobot-v1",
-        use_reinforce=True,
-        algorithm_class=Reinforce,
-        alpha_theta=alpha_theta,
-        alpha_w=alpha_w,
-        initial_temperature=initial_temperature,
-        temperature_decay=True,
-    )
-    save_results(acrobot_reinforce_decay_results, "acrobot_reinforce_decay")
-    plot_training_curves(
-        [
-            acrobot_actor_fixed_results,
-            acrobot_actor_decay_results,
-            acrobot_reinforce_fixed_results,
-            acrobot_reinforce_decay_results,
-        ],
-        "Actor-Critic & Reinforce on Acrobot-v1",
-    )
+    # print("Running Acrobot-v1 on Actor-Critic, Fixed Temp.")
+    # print("Running Acrobat-v1 experiement")
+    # acrobot_actor_fixed_results = run_experiments(
+    #     "Acrobot-v1",
+    #     use_reinforce=False,
+    #     algorithm_class=ActorCritic,
+    #     alpha_theta=1e-5,
+    #     alpha_w=1e-4,
+    #     initial_temperature=initial_temperature,
+    #     temperature_decay=False,
+    # )
+    # save_results(acrobot_actor_fixed_results, "acrobot_actor_fixed")
+    # print("Running Acrobot-v1 on Actor-Critic, Decay Temp.")
+    # acrobot_actor_decay_results = run_experiments(
+    #     "Acrobot-v1",
+    #     use_reinforce=False,
+    #     algorithm_class=ActorCritic,
+    #     alpha_theta=1e-5,
+    #     alpha_w=1e-4,
+    #     initial_temperature=initial_temperature,
+    #     temperature_decay=True,
+    # )
+    # save_results(acrobot_actor_decay_results, "acrobot_actor_decay")
+    # print("Running Acrobot-v1 on REINFORCE, Fixed Temp.")
+    # acrobot_reinforce_fixed_results = run_experiments(
+    #     "Acrobot-v1",
+    #     use_reinforce=True,
+    #     algorithm_class=Reinforce,
+    #     alpha_theta=alpha_theta,
+    #     alpha_w=alpha_w,
+    #     initial_temperature=initial_temperature,
+    #     temperature_decay=False,
+    # )
+    # save_results(acrobot_reinforce_fixed_results, "acrobot_reinforce_fixed")
+    #
+    # print("Running Acrobot-v1 on REINFORCE, Decay Temp.")
+    # acrobot_reinforce_decay_results = run_experiments(
+    #     "Acrobot-v1",
+    #     use_reinforce=True,
+    #     algorithm_class=Reinforce,
+    #     alpha_theta=alpha_theta,
+    #     alpha_w=alpha_w,
+    #     initial_temperature=initial_temperature,
+    #     temperature_decay=True,
+    # )
+    # save_results(acrobot_reinforce_decay_results, "acrobot_reinforce_decay")
+    # plot_training_curves(
+    #     [
+    #         acrobot_actor_fixed_results,
+    #         acrobot_actor_decay_results,
+    #         acrobot_reinforce_fixed_results,
+    #         acrobot_reinforce_decay_results,
+    #     ],
+    #     "Actor-Critic & Reinforce on Acrobot-v1",
+    # )
     ### ASSAULT EXPERIMENT ####
     print("Running ALE/Assault-ram-v5 experiement.")
     print("Running ALE/Assault-ram-v5 on Actor-Critic, Fixed Temp.")
@@ -527,8 +532,8 @@ def main():
         "ALE/Assault-ram-v5",
         use_reinforce=False,
         algorithm_class=ActorCritic,
-        alpha_theta=alpha_theta,
-        alpha_w=alpha_w,
+        alpha_theta=1e-5,
+        alpha_w=1e-4,
         initial_temperature=initial_temperature,
         temperature_decay=False,
     )
@@ -538,8 +543,8 @@ def main():
         "ALE/Assault-ram-v5",
         use_reinforce=False,
         algorithm_class=ActorCritic,
-        alpha_theta=alpha_theta,
-        alpha_w=alpha_w,
+        alpha_theta=1e-5,
+        alpha_w=1e-5,
         initial_temperature=initial_temperature,
         temperature_decay=True,
     )
@@ -550,8 +555,8 @@ def main():
         "ALE/Assault-ram-v5",
         use_reinforce=True,
         algorithm_class=Reinforce,
-        alpha_theta=alpha_theta,
-        alpha_w=alpha_w,
+        alpha_theta=1e-4,
+        alpha_w=1e-4,
         initial_temperature=initial_temperature,
         temperature_decay=False,
     )
@@ -562,8 +567,8 @@ def main():
         "ALE/Assault-ram-v5",
         use_reinforce=True,
         algorithm_class=Reinforce,
-        alpha_theta=alpha_theta,
-        alpha_w=alpha_w,
+        alpha_theta=1e-4,
+        alpha_w=1e-4,
         initial_temperature=initial_temperature,
         temperature_decay=True,
     )
